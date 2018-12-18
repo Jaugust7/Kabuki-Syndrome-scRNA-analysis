@@ -1,0 +1,86 @@
+---
+title: "1-Data loading and pre-processing"
+author: "Loyal Goff"
+date: "2/19/2018"
+output: html_document
+---
+
+```{r init}
+library(cellrangerRkit)
+library(monocle)
+library(stringr)
+```
+
+```{r load_data}
+cellranger_pipestance_path <- "/Volumes/Bluecrab/work-zfs/seq/lgoff/Bjornsson_10x/preprocessing/KS1_10x_aggr_no_norm"
+dat <- load_cellranger_matrix(cellranger_pipestance_path)
+analysis_results <- load_cellranger_analysis_results(cellranger_pipestance_path)
+
+colnames(fData(dat))<-c("gene_id","gene_short_name")
+
+pData(dat)$sample_id<-str_split_fixed(as.character(pData(dat)$barcode),"-",2)[,2]
+
+# Create PhenoData
+sampleInfo<-read.csv("/Volumes/Bluecrab/work-zfs/seq/lgoff/Bjornsson_10x/preprocessing/KS1_10x_aggr_no_norm/outs/aggregation_csv.csv")
+
+sampleInfo$genotype<-c("KS1","WT","KS1","WT","KS1","WT","KS1","WT")
+sampleInfo$clone<-c("KS1-1","C1-2","KS1-1","C1-2","KS1-7","C3-1","KS1-7","C3-1")
+sampleInfo$cellType<-c("iPSC","iPSC","NPC","NPC","iPSC","iPSC","NPC","NPC")
+
+phenoData<-merge(pData(dat),sampleInfo,by.x='sample_id',by.y=0,all.x=TRUE,sort = FALSE)
+rownames(phenoData)<-phenoData$barcode
+```
+
+```{r convert_to_CDS}
+dat.cds<-newCellDataSet(cellData=as(exprs(dat),"sparseMatrix"),
+                        phenoData=AnnotatedDataFrame(phenoData),
+                        featureData=AnnotatedDataFrame(fData(dat)),
+                        lowerDetectionLimit = 0.1,
+                        expressionFamily=negbinomial.size()
+)
+```
+
+```{r}
+saveRDS(dat.cds,"dat.cds.rds")
+```
+
+```{r load_saved_data}
+dat.cds<-readRDS("dat.cds.rds")
+```
+
+# NPCs only
+```{r}
+dat.npc<-dat.cds[,pData(dat.cds)$cellType=="NPC"]
+
+dat.npc<-estimateSizeFactors(dat.npc)
+dat.npc<-estimateDispersions(dat.npc)
+
+dat.npc<-detectGenes(dat.npc)
+cellCutoff<-20
+expressed_genes<-row.names(subset(fData(dat.npc),
+    num_cells_expressed >= cellCutoff))
+
+# find High Variance genes
+disp_table <- dispersionTable(dat.npc)
+unsup_clustering_genes <- subset(disp_table, mean_expression >= 0.0005 & dispersion_empirical >= 1*dispersion_fit)
+dat.npc <- setOrderingFilter(dat.npc, unsup_clustering_genes$gene_id)
+plot_ordering_genes(dat.npc)
+
+```
+
+## Differential Expression Analysis (NPCs only)
+```{r}
+npc.KS_vs_WT<-differentialGeneTest(dat.npc[expressed_genes,],
+                                      fullModelFormulaStr = "~num_genes_expressed + genotype", reducedModelFormulaStr = "~num_genes_expressed",cores=5)
+
+NPC.KS_vs_WT.sig_genes <- subset(npc.KS_vs_WT, qval < 0.000000000000000000000000000000001)
+
+```
+
+
+
+
+```{r session}
+sessionInfo()
+```
+

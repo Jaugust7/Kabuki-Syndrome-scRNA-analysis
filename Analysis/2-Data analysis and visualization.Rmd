@@ -1,0 +1,639 @@
+---
+title: "2-Data_analysis_and_visualization"
+author: "Jonathan Augustin"
+date: "3/9/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(scran)
+library(monocle)
+library(Matrix)
+library(umap)
+library(RColorBrewer)
+library(marray)
+library(data.table)
+library(viridis)
+library(knitr)
+library(destiny)
+library(scVisualizeR)
+library(dplyr)
+```
+
+```{r import Data, tidy=T}
+#import cds object from "1-Data loading and pre-preprocessing"
+dat.cds<-readRDS("dat.cds.rds")
+
+#subset the cds object by NPCs
+dat.npc<-dat.cds[,pData(dat.cds)$cellType=="NPC"]
+
+#subset the cds object by iPSCs
+dat.ipsc<-dat.cds[,pData(dat.cds)$cellType=="iPSC"]
+
+#Remove sample KS1_7 as it had a weird Karyotype
+dat.npc<-dat.npc[,pData(dat.npc)$clone != "KS1-7"]
+dat.cds<-dat.cds[,pData(dat.cds)$clone != "KS1-7"]
+dat.ipsc<-dat.ipsc[,pData(dat.ipsc)$clone != "KS1-7"]
+
+#use cyclone from scran to assign cell cycle phase for NPCs
+hs.pairs <- readRDS(system.file("exdata", "human_cycle_markers.rds", package="scran"))
+assigned <- cyclone(as.matrix(exprs(dat.npc)), pairs=hs.pairs)
+pData(dat.npc)$cell_cyc<-assigned$phases
+
+#Estimate size factors and dispersions
+dat.npc<-estimateSizeFactors(dat.npc)
+dat.npc<-estimateDispersions(dat.npc, cores=4)
+
+dat.ipsc<-estimateSizeFactors(dat.ipsc)
+dat.ipsc<-estimateDispersions(dat.ipsc, cores=4)
+
+dat.cds<-estimateSizeFactors(dat.cds)
+dat.cds<-estimateDispersions(dat.cds, cores=4)
+
+#Detect genes and impose a cutoff for the number of cells expressing a gene
+dat.npc<-detectGenes(dat.npc)
+cellCutoff<-20
+expressed_genes_npc<-row.names(subset(fData(dat.npc),
+    num_cells_expressed >= cellCutoff))
+
+dat.cds<-detectGenes(dat.cds)
+cellCutoff<-20
+expressed_genes_cds<-row.names(subset(fData(dat.cds),
+    num_cells_expressed >= cellCutoff))
+
+dat.ipsc<-detectGenes(dat.ipsc)
+cellCutoff<-20
+expressed_genes_ipsc<-row.names(subset(fData(dat.ipsc),
+    num_cells_expressed >= cellCutoff))
+
+# find high variance genes
+disp_table_npc <- dispersionTable(dat.npc)
+unsup_clustering_genes_npc <- subset(disp_table_npc, mean_expression >= 0.0005 & dispersion_empirical >= 1*dispersion_fit)
+npc.var.genes<-unsup_clustering_genes_npc$gene_id
+dat.npc <- setOrderingFilter(dat.npc, unsup_clustering_genes_npc$gene_id)
+plot_ordering_genes(dat.npc)
+
+disp_table_ipsc <- dispersionTable(dat.ipsc)
+unsup_clustering_genes_ipscs <- subset(disp_table_ipsc, mean_expression >= 0.0005 & dispersion_empirical >= 1*dispersion_fit)
+ipscs.var.genes<-unsup_clustering_genes_ipscs$gene_id
+dat.ipsc <- setOrderingFilter(dat.ipsc, unsup_clustering_genes_ipscs$gene_id)
+plot_ordering_genes(dat.ipsc)
+
+disp_table_cds <- dispersionTable(dat.cds)
+unsup_clustering_genes_cds <- subset(disp_table_cds, mean_expression >= 0.0005 & dispersion_empirical >= 1*dispersion_fit)
+var.genes<-unsup_clustering_genes_cds$gene_id
+dat.cds <- setOrderingFilter(dat.cds, unsup_clustering_genes_cds$gene_id)
+plot_ordering_genes(dat.cds)
+
+#differential gene test for NPCs only
+npc.KS_vs_WT<-differentialGeneTest(dat.npc[expressed_genes_npc,],
+                                      fullModelFormulaStr = "~num_genes_expressed + genotype", reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+NPC.KS_vs_WT.sig_genes <- subset(npc.KS_vs_WT, qval < 0.000000000000000000000000000000001)
+deg_npc_list<-rownames(NPC.KS_vs_WT.sig_genes)
+write.table(NPC.KS_vs_WT.sig_genes, "KS_vs_WT.sig_genes_npcs.txt", sep = "\t")
+
+#differential gene test for iPSCs only
+ipsc.KS_vs_WT<-differentialGeneTest(dat.ipsc[expressed_genes_ipsc,],
+                                      fullModelFormulaStr = "~num_genes_expressed + genotype", reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+iPSC.KS_vs_WT.sig_genes <- subset(ipsc.KS_vs_WT, qval < 0.000000000000000000000000000000001)
+write.table(iPSC.KS_vs_WT.sig_genes, "KS_vs_WT.sig_genes_ipscs.txt", sep = "\t")
+
+#Subset dat.npc by differentially expressed genes
+diff_npcs <- dat.npc[row.names(subset(fData(dat.npc),
+              gene_short_name %in% NPC.KS_vs_WT.sig_genes$gene_short_name)),]
+
+#Subset dat.ipsc by differentially expressed genes
+diff_ipsc <- dat.ipsc[row.names(subset(fData(dat.ipsc),
+              gene_short_name %in% iPSC.KS_vs_WT.sig_genes$gene_short_name)),]
+
+#Add total mRNAs column to pData
+pData(dat.cds)$Total_mRNAs <- colSums(exprs(dat.cds))
+pData(dat.npc)$Total_mRNAs <- colSums(exprs(dat.npc))
+pData(dat.ipsc)$Total_mRNAs <- colSums(exprs(dat.ipsc))
+```
+
+```{r QC all cells, tidy=T}
+#QC for dataset (number of UMIs)
+hist(colSums(exprs(dat.cds)), breaks=100)
+
+#QC for dataset (number of cells expressing a gene)
+hist(fData(dat.cds)$num_cells_expressed, breaks=100)
+
+#QC for dataset (number of genes expressed)
+hist(pData(dat.cds)$num_genes_expressed, breaks =100)
+
+#quick QC for all cells
+pData(dat.cds)$Total_mRNAs<-Matrix::colSums(exprs(dat.cds))
+
+qplot(Total_mRNAs, data=pData(dat.cds), fill=clone, geom="density", alpha=0.1) + facet_wrap("clone") + guides(fill = "none") + theme_bw()
+
+#quick QC for NPCs
+pData(dat.npc)$Total_mRNAs<-Matrix::colSums(exprs(dat.npc))
+
+qplot(Total_mRNAs, data=pData(dat.npc), fill=clone, geom="density", alpha=0.1) + facet_wrap("clone") + guides(fill = "none") + theme_bw()
+```
+
+```{r TBD, tidy=T}
+#subset the diff_npcs object to seperate by genotype
+diff_KS_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "KS1"]
+diff_WT_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "WT"]
+
+#calculate the mean_cpc for both groups
+fData(diff_KS_npc)$mean_cpc<-as.vector(apply(exprs(diff_KS_npc), 1, mean))
+fData(diff_WT_npc)$mean_cpc<-as.vector(apply(exprs(diff_WT_npc), 1, mean))
+
+#make df that is genes by genotype containing mean_cpc
+mean.genotype_npc<-data.frame(row.names =rownames(fData(diff_KS_npc)), "KS" = fData(diff_KS_npc)$mean_cpc, "WT"= fData(diff_WT_npc)$mean_cpc )
+
+#determine if the KS genes are up relative to WT genes
+mean.genotype_npc$KS.dir<-ifelse(mean.genotype_npc$KS > mean.genotype_npc$WT, "UP", "DOWN")
+
+#subset by KS direction
+upregulated.KS_npc<-subset(mean.genotype_npc, KS.dir == "UP")
+downregulated.KS_npc<-subset(mean.genotype_npc, KS.dir == "DOWN")
+
+#make a vector of the genes
+UP.KS_NPC<-rownames(upregulated.KS_npc)
+DOWN.KS_NPC<-rownames(downregulated.KS_npc)
+
+#subset the original differentially expressed genes data frame using these lists
+upregulated.KS_npc<-subset(NPC.KS_vs_WT.sig_genes, rownames(NPC.KS_vs_WT.sig_genes) %in% UP.KS_NPC)
+write.table(upregulated.KS_npc, "upregulated_KS_npc.txt", sep = "\t")
+
+downregulated.KS_npc<-subset(NPC.KS_vs_WT.sig_genes, rownames(NPC.KS_vs_WT.sig_genes) %in% DOWN.KS_NPC)
+write.table(downregulated.KS_npc, "downregulated_KS_npc.txt", sep = "\t")
+```
+
+```{r TBD, tidy=T}
+#subset the diff_npcs object to seperate by genotype
+diff_KS_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "KS1"]
+diff_WT_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "WT"]
+
+#calculate the mean_cpc for both groups
+fData(diff_KS_npc)$mean_cpc<-as.vector(apply(exprs(diff_KS_npc), 1, mean))
+fData(diff_WT_npc)$mean_cpc<-as.vector(apply(exprs(diff_WT_npc), 1, mean))
+
+#make df that is genes by genotype containing mean_cpc
+mean.genotype_npc<-data.frame(row.names =rownames(fData(diff_KS_npc)), "KS" = fData(diff_KS_npc)$mean_cpc, "WT"= fData(diff_WT_npc)$mean_cpc )
+
+#determine if the KS genes are up relative to WT genes
+mean.genotype_npc$KS.dir<-ifelse(mean.genotype_npc$KS > mean.genotype_npc$WT, "UP", "DOWN")
+
+#subset by KS direction
+upregulated.KS_npc<-subset(mean.genotype_npc, KS.dir == "UP")
+downregulated.KS_npc<-subset(mean.genotype_npc, KS.dir == "DOWN")
+
+#make a vector of the genes
+UP.KS_NPC<-rownames(upregulated.KS_npc)
+DOWN.KS_NPC<-rownames(downregulated.KS_npc)
+
+#subset the original differentially expressed genes data frame using these lists
+upregulated.KS_npc<-subset(NPC.KS_vs_WT.sig_genes, rownames(NPC.KS_vs_WT.sig_genes) %in% UP.KS_NPC)
+write.table(upregulated.KS_npc, "upregulated_KS_npc.txt", sep = "\t")
+
+downregulated.KS_npc<-subset(NPC.KS_vs_WT.sig_genes, rownames(NPC.KS_vs_WT.sig_genes) %in% DOWN.KS_NPC)
+write.table(downregulated.KS_npc, "downregulated_KS_npc.txt", sep = "\t")
+```
+
+```{r TBD, tidy=T}
+#subset the npcs by stage in cell cycle
+npc_g1<-dat.npc[,pData(dat.npc)$cell_cyc %in% "G1"]
+npc_s<-dat.npc[,pData(dat.npc)$cell_cyc %in% "S"]
+npc_g2m<-dat.npc[,pData(dat.npc)$cell_cyc %in% "G2M"]
+
+#differential gene test for G1 NPCs
+npc_G1.WT_vs_KS1<-differentialGeneTest(npc_g1[expressed_genes_npc,],
+                                      fullModelFormulaStr = "~num_genes_expressed + genotype", reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+NPC.KS_vs_WT_G1.sig_genes <- subset(npc_G1.WT_vs_KS1, qval < 0.000000000000000000000000000000001)
+deg_npc_g1_list<-rownames(NPC.KS_vs_WT_G1.sig_genes)
+write.table(NPC.KS_vs_WT_G1.sig_genes, "KS_vs_WT_G1.sig_genes_npcs.txt", sep = "\t")
+
+#differential gene test for G2M NPCs
+npc_G2M.WT_vs_KS1<-differentialGeneTest(npc_g2m[expressed_genes_npc,],
+                                      fullModelFormulaStr = "~num_genes_expressed + genotype", reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+NPC.KS_vs_WT_g2m.sig_genes <- subset(npc_G2M.WT_vs_KS1, qval < 0.000000000000000000000000000000001)
+deg_npc_g2M_list<-rownames(NPC.KS_vs_WT_G2M.sig_genes)
+write.table(NPC.KS_vs_WT_g2m.sig_genes, "KS_vs_WT_G2M.sig_genes_npcs.txt", sep = "\t")
+
+#differential gene test for S NPCs
+npc_S.WT_vs_KS1<-differentialGeneTest(npc_s[expressed_genes_npc,],
+                                      fullModelFormulaStr = "~num_genes_expressed + genotype", reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+NPC.KS_vs_WT_S.sig_genes <- subset(npc_S.WT_vs_KS1, qval < 0.000000000000000000000000000000001)
+deg_npc_S_list<-rownames(NPC.KS_vs_WT_S.sig_genes)
+write.table(NPC.KS_vs_WT_S.sig_genes, "KS_vs_WT_S.sig_genes_npcs.txt", sep = "\t")
+```
+
+```{r G1, tidy = T}
+#split cds by genotype
+diff_KS_g1<-npc_g1[,pData(npc_g1)$genotype == "KS1"]
+diff_WT_g1<-npc_g1[,pData(npc_g1)$genotype == "WT"]
+#calculate the mean_cpc for both groups
+fData(diff_KS_g1)$mean_cpc<-as.vector(apply(exprs(diff_KS_g1), 1, mean))
+fData(diff_WT_g1)$mean_cpc<-as.vector(apply(exprs(diff_WT_g1), 1, mean))
+
+#make df that is genes by genotype containing mean_cpc
+mean.genotype_g1<-data.frame(row.names =rownames(fData(diff_KS_g1)), "KS" = fData(diff_KS_g1)$mean_cpc, "WT"= fData(diff_WT_g1)$mean_cpc )
+
+#determine if the KS genes are up relative to WT genes
+mean.genotype_g1$KS.dir<-ifelse(mean.genotype_g1$KS > mean.genotype_g1$WT, "UP", "DOWN")
+
+#subset by KS direction
+upregulated.KS_g1<-subset(mean.genotype_g1, KS.dir == "UP")
+downregulated.KS_g1<-subset(mean.genotype_g1, KS.dir == "DOWN")
+
+#make a vector of the genes
+UP.KS_G1<-rownames(upregulated.KS_g1)
+DOWN.KS_G1<-rownames(downregulated.KS_g1)
+
+#subset the original differentially expressed genes data frame using these lists
+upregulated.KS_g1<-subset(NPC.KS_vs_WT_G1.sig_genes, rownames(NPC.KS_vs_WT_G1.sig_genes) %in% UP.KS_G1)
+write.table(upregulated.KS_g1, "upregulated_KS_g1.txt", sep = "\t")
+
+downregulated.KS_g1<-subset(NPC.KS_vs_WT_G1.sig_genes, rownames(NPC.KS_vs_WT_G1.sig_genes) %in% DOWN.KS_G1)
+write.table(downregulated.KS_g1, "downregulated_KS_g1.txt", sep = "\t")
+```
+
+```{r G2M, tidy = T}
+#split cds by genotype
+diff_KS_g2m<-npc_g2m[,pData(npc_g2m)$genotype == "KS1"]
+diff_WT_g2m<-npc_g2m[,pData(npc_g2m)$genotype == "WT"]
+#calculate the mean_cpc for both groups
+fData(diff_KS_g2m)$mean_cpc<-as.vector(apply(exprs(diff_KS_g2m), 1, mean))
+fData(diff_WT_g2m)$mean_cpc<-as.vector(apply(exprs(diff_WT_g2m), 1, mean))
+
+#make df that is genes by genotype containing mean_cpc
+mean.genotype_g2m<-data.frame(row.names =rownames(fData(diff_KS_g2m)), "KS" = fData(diff_KS_g2m)$mean_cpc, "WT"= fData(diff_WT_g2m)$mean_cpc )
+
+#determine if the KS genes are up relative to WT genes
+mean.genotype_g2m$KS.dir<-ifelse(mean.genotype_g2m$KS > mean.genotype_g2m$WT, "UP", "DOWN")
+
+#subset by KS direction
+upregulated.KS_g2m<-subset(mean.genotype_g2m, KS.dir == "UP")
+downregulated.KS_g2m<-subset(mean.genotype_g2m, KS.dir == "DOWN")
+
+#make a vector of the genes
+UP.KS_g2m<-rownames(upregulated.KS_g2m)
+DOWN.KS_g2m<-rownames(downregulated.KS_g2m)
+
+#subset the original differentially expressed genes data frame using these lists
+upregulated.KS_g2m<-subset(NPC.KS_vs_WT_g2m.sig_genes, rownames(NPC.KS_vs_WT_g2m.sig_genes) %in% UP.KS_g2m)
+write.table(upregulated.KS_g2m, "upregulated_KS_g2m.txt", sep = "\t")
+
+downregulated.KS_g2m<-subset(NPC.KS_vs_WT_g2m.sig_genes, rownames(NPC.KS_vs_WT_g2m.sig_genes) %in% DOWN.KS_g2m)
+write.table(downregulated.KS_g2m, "downregulated_KS_g2m.txt", sep = "\t")
+```
+
+```{r S, tidy = T}
+#split cds by genotype
+diff_KS_s<-npc_s[,pData(npc_s)$genotype == "KS1"]
+diff_WT_s<-npc_s[,pData(npc_s)$genotype == "WT"]
+#calculate the mean_cpc for both groups
+fData(diff_KS_s)$mean_cpc<-as.vector(apply(exprs(diff_KS_s), 1, mean))
+fData(diff_WT_s)$mean_cpc<-as.vector(apply(exprs(diff_WT_s), 1, mean))
+
+#make df that is genes by genotype containing mean_cpc
+mean.genotype_s<-data.frame(row.names =rownames(fData(diff_KS_s)), "KS" = fData(diff_KS_s)$mean_cpc, "WT"= fData(diff_WT_s)$mean_cpc )
+
+#determine if the KS genes are up relative to WT genes
+mean.genotype_s$KS.dir<-ifelse(mean.genotype_s$KS > mean.genotype_s$WT, "UP", "DOWN")
+
+#subset by KS direction
+upregulated.KS_s<-subset(mean.genotype_s, KS.dir == "UP")
+downregulated.KS_s<-subset(mean.genotype_s, KS.dir == "DOWN")
+
+#make a vector of the genes
+UP.KS_s<-rownames(upregulated.KS_s)
+DOWN.KS_s<-rownames(downregulated.KS_s)
+
+#subset the original differentially expressed genes data frame using these lists
+upregulated.KS_s<-subset(NPC.KS_vs_WT_S.sig_genes, rownames(NPC.KS_vs_WT_S.sig_genes) %in% UP.KS_s)
+write.table(upregulated.KS_s, "upregulated_KS_s.txt", sep = "\t")
+
+downregulated.KS_s<-subset(NPC.KS_vs_WT_S.sig_genes, rownames(NPC.KS_vs_WT_S.sig_genes) %in% DOWN.KS_s)
+write.table(downregulated.KS_s, "downregulated_KS_s.txt", sep = "\t")
+```
+
+```{r Generate UMAPs, tidy=T, fig.height=10, fig.width=10}
+#use scVisualizeR to find UMAP coordinates and generate UMAP visualizations
+PCpicker(dat.npc, num_pcs = 20)
+dat.npc<-cordNormUMAP(dat.npc, nComp = c(1:10))
+npc.UMAP<-plotUMAP(dat.npc, cell_color = "clone")
+npc.cellcycle.UMAP<-plotUMAP(dat.npc, cell_color = "cell_cyc")
+
+pdf(file = "~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/UMAPs/npcs_normUMAP.pdf", height = 10, width = 12)
+npc.UMAP
+dev.off()
+
+pdf(file = "~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/UMAPs/npcs_cellcylce_UMAP.pdf", height = 10, width = 12)
+npc.cellcycle.UMAP
+dev.off()
+
+#look at read depth for each cell
+myUMAPPlot(dat.npc, color_by = "num_genes_expressed") + scale_color_viridis()
+myUMAPPlot(dat.npc, color_by = "Total_mRNAs") + scale_color_viridis()
+```
+
+```{r Marker Genes, tidy = T}
+#NPCs coloring by gene expression
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_sample_markers.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.npc, markers=c("MAP2", "PAX6", "ASCL1", "HES5", "HES6", "DLL3")) + scale_color_gradient(low="gray95", high="red")
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_progenitors.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.npc, markers=c("MSI1", "SOX1", "ASCL1", "SOX2", "PAX6", "GFAP")) + scale_color_gradient(low="gray95", high="red")
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_pseudotime_genes.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.npc, markers=diff_test_npc_pseudotime_gene_names) + scale_color_gradient(low="gray95", high="red")
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_cell_cycle.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.npc, markers=c("CDK2", "PCNA", "SKP2", "CCND1", "GTSE1", "G2E3",  "WEE1", "PLK1", "RB1", "PCNA")) + scale_color_gradient(low="gray95", high="red")
+dev.off()
+
+myUMAPPlotMarkers(dat.npc, markers=c("HES1" ,"HES5", "MAP2", "DCX", "LIN28A", "SOX2", "HES6", "NEUROD1", "RBFOX3")) + scale_color_gradient(low="gray95", high="red")
+
+myUMAPPlotMarkers(dat.npc, markers=c("KMT2D","POMP", "HIF1A", "DCX")) + scale_color_gradient(low="gray95", high="red")
+```
+
+```{r Cluster cells, tidy=T}
+#Clustering for NPCs (need monocle 3 or possibly monocle 2.8)
+dat.npc@reducedDimA<-t(pData(dat.npc)[,c(12:13)])
+dat.npc<-clusterCells(dat.npc,method="louvain",louvain_iter = 2,k = 75)
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs by cluster.pdf", height = 10, width = 12)
+myUMAPPlot(dat.npc,color_by="Cluster") + scale_color_discrete()
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs facetted UMAP NPCs by cluster.pdf", height = 10, width = 12)
+myUMAPPlot(dat.npc,color_by="Cluster") + scale_color_discrete() + facet_wrap("Cluster")
+dev.off()
+
+#annotate the NPCs
+pData(dat.npc)$type[which(pData(dat.npc)$Cluster %in% c(1:22))]<-"Cycling"
+pData(dat.npc)$type[which(pData(dat.npc)$Cluster %in% c(16))]<-"Differentiating"
+pData(dat.npc)$type[which(pData(dat.npc)$Cluster %in% c(5,9))]<-"Mature"
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs by type.pdf", height = 10, width = 12)
+myUMAPPlot(dat.npc,color_by="type") + scale_color_manual(values=c("purple", "gray50", "orange"))
+dev.off()
+
+#plot only maturing cells umap
+dat.mature<-dat.npc[,pData(dat.npc)$type == "Mature" ]
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP mature NPCs.pdf", height = 10, width = 12)
+ggplot(data=pData(dat.mature), aes(x=UMAP1, y=UMAP2, color=clone)) + geom_point(size=1, alpha=0.5) + theme_bw() + scale_color_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + labs(x="UMAP 1", y ="UMAP 2") + monocle:::monocle_theme_opts()
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP mature NPCs lm fit.pdf", height = 10, width = 12)
+ggplot(data=pData(dat.mature), aes(x=UMAP1, y=UMAP2, color="blue")) + geom_point(size=1.5, alpha=0.5) + theme_bw() + scale_color_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + labs(x="UMAP 1", y ="UMAP 2") + geom_smooth(method = "lm", se = FALSE) + monocle:::monocle_theme_opts()
+dev.off()
+
+augment.mature<-broom::augment(lm(UMAP2~UMAP1, data=pData(dat.mature)))
+pData(dat.mature)$fitted<-augment.mature$.fitted
+pData(dat.mature)$resid<-augment.mature$.resid
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs lm residuals.pdf", height = 10, width = 12)
+ggplot(data=pData(dat.mature)) + geom_point(aes(x=fitted, y=resid, color=clone), size=1, alpha=0.5) + scale_color_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + monocle:::monocle_theme_opts()
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs DCX expression.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.npc, markers = c("LDHA", "ANXA2", "HIF1A", "VHL", "GPX1")) + scale_color_gradient(low="gray95", high = "red") 
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/Residuals NPCs DCX expression.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.mature, markers = c("DCX", "MAP2", "SNAP25", "HES6"), x_cord ="fitted", y_cord = "resid") + scale_color_gradient(low="gray95", high = "red") 
+dev.off()
+
+#Create decile pData column
+pData(dat.mature)$decile <- (pData(dat.mature) %>% mutate(quantile = ntile(fitted, 10)))$quantile
+pData(dat.mature)$decile <- as.character(pData(dat.mature)$decile)
+
+UMAP_decile_mature<-ggplot(data=pData(dat.mature), aes(x=fitted, y=resid, color=decile)) + geom_point(size=1.5, alpha=0.5) + theme_bw()  + labs(x="UMAP 1", y ="UMAP 2", color ="Decile") + monocle:::monocle_theme_opts()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs binned residuals.pdf", height = 10, width = 12)
+UMAP_decile_mature
+dev.off()
+
+UMAP_decile_mature<-ggplot(data=pData(dat.mature), aes(x=UMAP1, y=UMAP2, color=decile)) + geom_point(size=1.5, alpha=0.5) + theme_bw() + labs(x="UMAP 1", y ="UMAP 2", color ="Decile") + monocle:::monocle_theme_opts()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs binned regular.pdf", height = 10, width = 12)
+UMAP_decile_mature
+dev.off()
+
+table_1<-as.data.frame(table(subset(pData(dat.mature), decile == 1)$clone))
+table_2<-as.data.frame(table(subset(pData(dat.mature), decile == 2)$clone))
+table_3<-as.data.frame(table(subset(pData(dat.mature), decile == 3)$clone))
+table_4<-as.data.frame(table(subset(pData(dat.mature), decile == 4)$clone))
+table_5<-as.data.frame(table(subset(pData(dat.mature), decile == 5)$clone))
+table_6<-as.data.frame(table(subset(pData(dat.mature), decile == 6)$clone))
+table_7<-as.data.frame(table(subset(pData(dat.mature), decile == 7)$clone))
+table_8<-as.data.frame(table(subset(pData(dat.mature), decile == 8)$clone))
+table_9<-as.data.frame(table(subset(pData(dat.mature), decile == 9)$clone))
+table_10<-as.data.frame(table(subset(pData(dat.mature), decile == 10)$clone))
+
+df<-Reduce(function(...) merge(..., all = TRUE, by="Var1"), list(table_1, table_2, table_3, table_4, table_5, table_6, table_7, table_8, table_9, table_10))
+
+colnames(df)<-c("clone", "1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th")
+
+df[is.na(df)] <- 0
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs binned barplots.pdf", height = 8, width = 8)
+ggplot(melt(df)) + geom_bar(aes(x=clone, fill=clone, y=value), stat = "identity") + facet_wrap(~variable) + scale_fill_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + theme_bw()
+dev.off()
+
+df.m<-melt(df)
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs binned heatmap.pdf", height = 3, width = 2)
+ggplot(df.m, aes(clone, variable)) + geom_tile(aes(fill=value), color = "white") + scale_fill_gradient(low = "gray95", high = "red") + theme_bw() + labs(y = "Quantile", x= "Clone") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+dev.off()
+
+d.genes<-subset(dat.mature,fData(dat.mature)$gene_short_name %in% c("SOX2", "SNAP25", "PAX6", "MAP2", "HES6", "HES5", "DCX"))
+
+pData(d.genes)$decile<-as.numeric(pData(d.genes)$decile)
+tmp<-lapply(c(1:10), function(x){
+  i<-d.genes[,pData(d.genes)$decile %in% x]
+  return(apply(as.matrix(exprs(i)), 1, sum))
+})
+
+tmp<-do.call(cbind,tmp)
+rownames(tmp)<-fData(d.genes)$gene_short_name
+colnames(tmp)<-c(1:10)
+i1 <- !rowSums(tmp==1)>0
+tmp[i1,] <- tmp[i1,]/do.call(pmax, as.data.frame(tmp[i1,]))
+melt.d.genes<-melt(tmp)
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/mature npcs UMAP binned heatmap scaled gene expression.pdf")
+ggplot(melt.d.genes, aes(Var2, Var1)) + geom_tile(aes(fill=value), color = "white") + scale_fill_gradient2(low = "steelblue", high = "red", midpoint=0.5) + theme_bw() + labs(y = "Gene", x= "Decile", fill="Scaled Gene Expression") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+dev.off()
+
+
+myUMAPMarkers(dat.mature)
+```
+
+```{r NPC differential test for clustersr}
+mature_npc.KS_vs_WT<-differentialGeneTest(dat.npc[,pData(dat.npc)$type=="Mature"][expressed_genes_npc,]
+                                          ,fullModelFormulaStr = "~num_genes_expressed + genotype", 
+                                          reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+mature_npc.KS_vs_WT.sig_genes <- subset(mature_npc.KS_vs_WT, qval < 0.000000000000000000000000000000001)
+write.table(mature_npc.KS_vs_WT.sig_genes, "mature_npc_KS_vs_WT_sig_genes.txt", sep = "\t")
+
+cycling_npc.KS_vs_WT<-differentialGeneTest(dat.npc[,pData(dat.npc)$type=="Cycling"][expressed_genes_npc,]
+                                          ,fullModelFormulaStr = "~num_genes_expressed + genotype", 
+                                          reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+cycling_npc.KS_vs_WT.sig_genes <- subset(intermediate_npc.KS_vs_WT, qval < 0.000000000000000000000000000000001)
+write.table(cycling_npc.KS_vs_WT.sig_genes, "cycling_npc_KS_vs_WT_sig_genes.txt", sep = "\t")
+diff_npc_cycling_genes<-row.names(cycling_npc.KS_vs_WT.sig_genes)
+
+#Differentially expressed genes by cluster in NPCs
+npc_by_type<-differentialGeneTest(dat.npc[expressed_genes_npc,]
+                                          ,fullModelFormulaStr = "~num_genes_expressed + type", 
+                                          reducedModelFormulaStr = "~num_genes_expressed",cores=4)
+
+npc_by_type.sig_genes <- subset(npc_by_type, qval < 0.000000000000000000000000000000001)
+write.table(npc_by_type, "npc_by_type.txt", sep = "\t")
+```
+
+```{r tidy =T}
+#Subset NPCs into Cycling and Differentiating
+dat.diff<-dat.npc[,pData(dat.npc)$type == "Mature"]
+dat.cyc<-dat.npc[,pData(dat.npc)$type == "Cycling"]
+
+#tables for percent cells in cell cycle using cyclone
+p.data.diff.ks<-pData(dat.diff[,pData(dat.diff)$genotype == "KS1"])
+p.data.diff.wt<-pData(dat.diff[,pData(dat.diff)$genotype == "WT"])
+  
+p.data.cyc.ks<-pData(dat.cyc[,pData(dat.cyc)$genotype == "KS1"])
+p.data.cyc.wt<-pData(dat.cyc[,pData(dat.cyc)$genotype == "WT"])
+
+myUMAPPlotMarkers(dat.diff, markers = c("DCX", "PAX6")) + scale_color_gradient(low="gray95", high="red")
+
+#maturing ks
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/maturing_ks.pdf", width = 5, height = 5)
+kable(table(p.data.diff.ks$cell_cyc)/sum(table(p.data.diff.ks$cell_cyc))*100, col.names = c("Cell Cycle Stage", "Percent Cells"))
+ggplot(as.data.frame((table(p.data.diff.ks$cell_cyc)/sum(table(p.data.diff.ks$cell_cyc)))*100), aes(x="", y=Freq, fill=Var1)) + geom_bar(width=1,stat = "identity") + coord_polar("y", start=0) + theme_bw() + labs(fill="Cell Cycle Stage", y= "Percent cells in cycle")
+dev.off()
+
+#maturing wt
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/maturing_wt.pdf", width = 5, height = 5)
+(table(p.data.diff.wt$cell_cyc)/sum(table(p.data.diff.wt$cell_cyc)))*100
+ggplot(as.data.frame((table(p.data.diff.wt$cell_cyc)/sum(table(p.data.diff.wt$cell_cyc)))*100), aes(x="", y=Freq, fill=Var1)) + geom_bar(width=1,stat = "identity") + coord_polar("y", start=0) + theme_bw() + labs(fill="Cell Cycle Stage", y= "Percent cells in cycle")
+dev.off()
+
+#cycling ks
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/cycling_ks.pdf", width = 5, height = 5)
+(table(p.data.cyc.ks$cell_cyc)/sum(table(p.data.cyc.ks$cell_cyc)))*100
+ggplot(as.data.frame((table(p.data.cyc.ks$cell_cyc)/sum(table(p.data.cyc.ks$cell_cyc)))*100), aes(x="", y=Freq, fill=Var1)) + geom_bar(width=1,stat = "identity") + coord_polar("y", start=0) + theme_bw() + labs(fill="Cell Cycle Stage", y= "Percent cells in cycle")
+dev.off()
+
+#cycling wt
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/cycling_wt.pdf", width = 5, height = 5)
+kable(table(p.data.cyc.wt$cell_cyc)/sum(table(p.data.cyc.wt$cell_cyc))*100, col.names = c("Cell Cycle Stage", "Percent Cells"))
+ggplot(as.data.frame((table(p.data.cyc.wt$cell_cyc)/sum(table(p.data.cyc.wt$cell_cyc)))*100), aes(x="", y=Freq, fill=Var1)) + geom_bar(width=1,stat = "identity") + coord_polar("y", start=0) + theme_bw() + labs(fill="Cell Cycle Stage", y= "Percent cells in cycle")
+dev.off()
+
+#Estimate size factors and find high variance genes for differentiating NPCs
+dat.diff<-estimateSizeFactors(dat.diff)
+dat.diff<-estimateDispersions(dat.diff, cores=4)
+
+disp_table_diff <- dispersionTable(dat.diff)
+unsup_clustering_genes_diff <- subset(disp_table_diff, mean_expression >= 0.002 & dispersion_empirical >= 1*dispersion_fit)
+diff.var.genes<-unsup_clustering_genes_diff$gene_id
+dat.diff <- setOrderingFilter(dat.diff, unsup_clustering_genes_diff$gene_id)
+plot_ordering_genes(dat.diff)
+
+#Estimate size factors and find high variance genes for cycling NPCs
+dat.cyc<-estimateSizeFactors(dat.cyc)
+dat.cyc<-estimateDispersions(dat.cyc, cores=4)
+
+disp_table_cyc <- dispersionTable(dat.cyc)
+unsup_clustering_genes_cyc <- subset(disp_table_cyc, mean_expression >= 0.0005 & dispersion_empirical >= 1*dispersion_fit)
+cyc.var.genes<-unsup_clustering_genes_cyc$gene_id
+dat.cyc <- setOrderingFilter(dat.cyc, unsup_clustering_genes_cyc$gene_id)
+plot_ordering_genes(dat.cyc)
+
+#umap for maturing npcs using differentially expressed genes
+dat.mature.pca<-prcomp_irlba(log10(t(exprs(dat.diff[row.names(subset(fData(dat.diff), row.names(fData(dat.diff)) %in% row.names(npc_by_type.sig_genes)))])+1)), n = 20)
+screeplot(dat.mature.pca,npcs=20)
+nComp<-c(1:20)
+mature_umap_pca<-umap(dat.mature.pca$x[,nComp]) 
+
+pData(dat.diff)$UMAP1<-mature_umap_pca$layout[,1]
+pData(dat.diff)$UMAP2<-mature_umap_pca$layout[,2]
+
+UMAP_cluster_diff<-ggplot(data=pData(dat.diff), aes(x=UMAP1, y=UMAP2, color=clone)) + geom_point(size=1, alpha=0.5) + theme_bw() + scale_color_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + labs(x="UMAP 1", y ="UMAP 2", color ="Clone") + monocle:::monocle_theme_opts()
+
+UMAP_cluster_diff
+
+#umap for npcs using high variance genes and all PCs
+mature<-umap(as.matrix(t(exprs(dat.npc[fData(dat.npc)$use_for_ordering == TRUE]))))
+pData(dat.npc)$UMAP1<-mature$layout[,1]
+pData(dat.npc)$UMAP2<-mature$layout[,2]
+
+UMAP_npc<-ggplot(data=pData(dat.npc), aes(x=UMAP1, y=UMAP2, color=clone)) + geom_point(size=1, alpha=0.5) + theme_bw() + scale_color_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + labs(x="UMAP 1", y ="UMAP 2", color ="Clone") + monocle:::monocle_theme_opts()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs.pdf", height = 10, width = 12)
+UMAP_npc
+dev.off()
+
+#UMAP for cycling NPCs using all expressed genes
+dat.cyc.pca<-prcomp_irlba(log10(t(exprs(dat.cyc)+1)), n = 20)
+screeplot(dat.cyc.pca,npcs=20)
+nComp<-c(1:9)
+cyc_umap_pca<-umap(dat.cyc.pca$x[,nComp]) 
+
+pData(dat.cyc)$UMAP1<-cyc_umap_pca$UMAP1
+pData(dat.cyc)$UMAP2<-cyc_umap_pca$UMAP2
+
+#umap_coords<-cyc_umap_pca[,grepl("^UMAP",colnames(cyc_umap_pca))]
+
+UMAP_cluster_cyc<-ggplot(pData(dat.cyc)) + geom_point(aes(x=UMAP1, y=UMAP2, color=clone), size=1, alpha=0.5) + theme_bw() + scale_color_manual(values=c("#377EB8", "#4DAF4A", "#E41A1C")) + labs(x="UMAP 1", y ="UMAP 2", color ="Clone") + monocle:::monocle_theme_opts()
+
+pdf(file = "~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/UMAP_cycling_npcs.pdf", height = 10, width = 12)
+UMAP_cluster_cyc
+dev.off()
+
+pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_cycling_cell_cycle.pdf", height = 10, width = 12)
+myUMAPPlotMarkers(dat.cyc, markers=c("CDK2", "PCNA", "SKP2", "CCND1", "GTSE1", "G2E3",  "WEE1", "PLK1", "RB1", "PCNA")) + scale_color_gradient(low="gray95", high="red")
+dev.off()
+
+#### SCRAN #### 
+#subset npc by genotype
+npc_pheno<-pData(dat.npc)
+npc_pheno_KS1<-subset(npc_pheno, genotype == "KS1")
+npc_pheno_WT<-subset(npc_pheno, genotype == "WT")
+
+(table(npc_pheno_KS1$cell_cyc)/sum(table(npc_pheno_KS1$cell_cyc)))*100
+(table(npc_pheno_WT$cell_cyc)/sum(table(npc_pheno_WT$cell_cyc)))*100
+
+#subset by clone id
+npc_pheno_C1_2<-subset(npc_pheno, clone == "C1-2")
+npc_pheno_C3_1<-subset(npc_pheno, clone == "C3-1")
+npc_pheno_KS1_1<-subset(npc_pheno, clone == "KS1-1")
+
+(table(npc_pheno_C1_2$cell_cyc)/sum(table(npc_pheno_C1_2$cell_cyc)))*100
+(table(npc_pheno_C3_1$cell_cyc)/sum(table(npc_pheno_C3_1$cell_cyc)))*100
+(table(npc_pheno_KS1_1$cell_cyc)/sum(table(npc_pheno_KS1_1$cell_cyc)))*100
+```
+
+```{r Export CDS to loom, tidy=T}
+writeMM(as(exprs(dat.cds), "sparseMatrix"), file = "myExprs.mtx")
+writeMM(as(exprs(dat.npc), "sparseMatrix"), file = "myExprs_npcs.mtx")
+
+write.csv(pData(dat.cds), file = "phenotype.csv")
+write.csv(fData(dat.cds), file = "features.csv")
+
+write.csv(pData(dat.npc), file = "phenotype_npc.csv")
+write.csv(fData(dat.npc), file = "features_npc.csv")
+```
+
+```{r}
+sessionInfo()
+```
