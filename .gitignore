@@ -4,7 +4,7 @@
 
 # Session Data files
 .RData
-./Analysis/dat.cds.rds
+/Analysis/dat.cds.rds
 
 # Example code in package build process
 *-Ex.R

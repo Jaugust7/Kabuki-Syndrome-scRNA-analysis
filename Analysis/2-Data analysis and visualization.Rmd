@@ -10,20 +10,19 @@ library(tidyverse)
 library(scran)
 library(monocle)
 library(Matrix)
-library(umap)
 library(RColorBrewer)
 library(marray)
 library(data.table)
-library(viridis)
 library(knitr)
 library(destiny)
 library(scVisualizeR)
 library(dplyr)
+library(viridis)
 ```
 
 ```{r import Data, tidy=T}
 #import cds object from "1-Data loading and pre-preprocessing"
-dat.cds<-readRDS("dat.cds.rds")
+dat.cds<-readRDS("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/dat.cds.rds")
 
 #subset the cds object by NPCs
 dat.npc<-dat.cds[,pData(dat.cds)$cellType=="NPC"]
@@ -50,7 +49,6 @@ dat.ipsc<-estimateDispersions(dat.ipsc, cores=4)
 
 dat.cds<-estimateSizeFactors(dat.cds)
 dat.cds<-estimateDispersions(dat.cds, cores=4)
-
 #Detect genes and impose a cutoff for the number of cells expressing a gene
 dat.npc<-detectGenes(dat.npc)
 cellCutoff<-20
@@ -342,22 +340,22 @@ myUMAPPlot(dat.npc, color_by = "Total_mRNAs") + scale_color_viridis()
 ```{r Marker Genes, tidy = T}
 #NPCs coloring by gene expression
 pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_sample_markers.pdf", height = 10, width = 12)
-myUMAPPlotMarkers(dat.npc, markers=c("MAP2", "PAX6", "ASCL1", "HES5", "HES6", "DLL3")) + scale_color_gradient(low="gray95", high="red")
+myUMAPPlotMarkers(dat.npc, markers=c("MAP2", "PAX6", "ASCL1", "HES5", "HES6", "DLL3"))
 dev.off()
 
 pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_progenitors.pdf", height = 10, width = 12)
-myUMAPPlotMarkers(dat.npc, markers=c("MSI1", "SOX1", "ASCL1", "SOX2", "PAX6", "GFAP")) + scale_color_gradient(low="gray95", high="red")
+myUMAPPlotMarkers(dat.npc, markers=c("MSI1", "SOX1", "ASCL1", "SOX2", "PAX6", "GFAP"))
 dev.off()
 
 pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_pseudotime_genes.pdf", height = 10, width = 12)
-myUMAPPlotMarkers(dat.npc, markers=diff_test_npc_pseudotime_gene_names) + scale_color_gradient(low="gray95", high="red")
+myUMAPPlotMarkers(dat.npc, markers=diff_test_npc_pseudotime_gene_names)
 dev.off()
 
 pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/umap_npc_cell_cycle.pdf", height = 10, width = 12)
-myUMAPPlotMarkers(dat.npc, markers=c("CDK2", "PCNA", "SKP2", "CCND1", "GTSE1", "G2E3",  "WEE1", "PLK1", "RB1", "PCNA")) + scale_color_gradient(low="gray95", high="red")
+myUMAPPlotMarkers(dat.npc, markers=c("CDK2", "PCNA", "SKP2", "CCND1", "GTSE1", "G2E3",  "WEE1", "PLK1", "RB1", "PCNA"))
 dev.off()
 
-myUMAPPlotMarkers(dat.npc, markers=c("HES1" ,"HES5", "MAP2", "DCX", "LIN28A", "SOX2", "HES6", "NEUROD1", "RBFOX3")) + scale_color_gradient(low="gray95", high="red")
+myUMAPPlotMarkers(dat.npc, markers=c("HES1" ,"HES5", "MAP2", "DCX", "LIN28A", "SOX2", "HES6", "NEUROD1", "RBFOX3"))
 
 myUMAPPlotMarkers(dat.npc, markers=c("KMT2D","POMP", "HIF1A", "DCX")) + scale_color_gradient(low="gray95", high="red")
 ```
@@ -404,11 +402,11 @@ ggplot(data=pData(dat.mature)) + geom_point(aes(x=fitted, y=resid, color=clone),
 dev.off()
 
 pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/all PCs UMAP NPCs DCX expression.pdf", height = 10, width = 12)
-myUMAPPlotMarkers(dat.npc, markers = c("LDHA", "ANXA2", "HIF1A", "VHL", "GPX1")) + scale_color_gradient(low="gray95", high = "red") 
+myUMAPPlotMarkers(dat.npc, markers = c("LDHA", "ANXA2", "HIF1A", "VHL", "GPX1")) 
 dev.off()
 
 pdf("~/../../Volumes/Augustin/R Projects/10x_KS1_iPSC/Residuals NPCs DCX expression.pdf", height = 10, width = 12)
-myUMAPPlotMarkers(dat.mature, markers = c("DCX", "MAP2", "SNAP25", "HES6"), x_cord ="fitted", y_cord = "resid") + scale_color_gradient(low="gray95", high = "red") 
+myUMAPPlotMarkers(dat.mature, markers = c("DCX", "MAP2", "SNAP25", "HES6"), x_cord ="fitted", y_cord = "resid")
 dev.off()
 
 #Create decile pData column
@@ -632,6 +630,9 @@ write.csv(fData(dat.cds), file = "features.csv")
 
 write.csv(pData(dat.npc), file = "phenotype_npc.csv")
 write.csv(fData(dat.npc), file = "features_npc.csv")
+
+#export dat.npc object for use in shiny app
+saveRDS(dat.npc, "dat.npc.rds")
 ```
 
 ```{r}
