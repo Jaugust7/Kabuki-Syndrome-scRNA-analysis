@@ -2,7 +2,9 @@
 title: "2-Data_analysis_and_visualization"
 author: "Jonathan Augustin"
 date: "3/9/2018"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -11,13 +13,10 @@ library(scran)
 library(monocle)
 library(Matrix)
 library(RColorBrewer)
-library(marray)
 library(data.table)
 library(knitr)
-library(destiny)
 library(scVisualizeR)
 library(dplyr)
-library(viridis)
 ```
 
 ```{r import Data, tidy=T}
@@ -134,7 +133,7 @@ pData(dat.npc)$Total_mRNAs<-Matrix::colSums(exprs(dat.npc))
 qplot(Total_mRNAs, data=pData(dat.npc), fill=clone, geom="density", alpha=0.1) + facet_wrap("clone") + guides(fill = "none") + theme_bw()
 ```
 
-```{r TBD, tidy=T}
+```{r, tidy=T}
 #subset the diff_npcs object to seperate by genotype
 diff_KS_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "KS1"]
 diff_WT_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "WT"]
@@ -165,7 +164,7 @@ downregulated.KS_npc<-subset(NPC.KS_vs_WT.sig_genes, rownames(NPC.KS_vs_WT.sig_g
 write.table(downregulated.KS_npc, "downregulated_KS_npc.txt", sep = "\t")
 ```
 
-```{r TBD, tidy=T}
+```{r, tidy=T}
 #subset the diff_npcs object to seperate by genotype
 diff_KS_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "KS1"]
 diff_WT_npc<-diff_npcs[,pData(diff_npcs)$genotype %in% "WT"]
@@ -196,7 +195,7 @@ downregulated.KS_npc<-subset(NPC.KS_vs_WT.sig_genes, rownames(NPC.KS_vs_WT.sig_g
 write.table(downregulated.KS_npc, "downregulated_KS_npc.txt", sep = "\t")
 ```
 
-```{r TBD, tidy=T}
+```{r, tidy=T}
 #subset the npcs by stage in cell cycle
 npc_g1<-dat.npc[,pData(dat.npc)$cell_cyc %in% "G1"]
 npc_s<-dat.npc[,pData(dat.npc)$cell_cyc %in% "S"]
@@ -474,7 +473,7 @@ dev.off()
 myUMAPMarkers(dat.mature)
 ```
 
-```{r NPC differential test for clustersr}
+```{r NPC differential test for clustersr, tidy = TRUE}
 mature_npc.KS_vs_WT<-differentialGeneTest(dat.npc[,pData(dat.npc)$type=="Mature"][expressed_genes_npc,]
                                           ,fullModelFormulaStr = "~num_genes_expressed + genotype", 
                                           reducedModelFormulaStr = "~num_genes_expressed",cores=4)
@@ -499,7 +498,7 @@ npc_by_type.sig_genes <- subset(npc_by_type, qval < 0.00000000000000000000000000
 write.table(npc_by_type, "npc_by_type.txt", sep = "\t")
 ```
 
-```{r tidy =T}
+```{r, tidy =T}
 #Subset NPCs into Cycling and Differentiating
 dat.diff<-dat.npc[,pData(dat.npc)$type == "Mature"]
 dat.cyc<-dat.npc[,pData(dat.npc)$type == "Cycling"]
@@ -635,6 +634,19 @@ write.csv(fData(dat.npc), file = "features_npc.csv")
 saveRDS(dat.npc, "dat.npc.rds")
 ```
 
-```{r}
+```{r GEO submission, tidy =T}
+#Write tables for NPC data frames
+write.csv(as.matrix(exprs(dat.npc)), "../Tables/GEO submission/Kabuki Syndrome NPC expression matrix.csv")
+write.csv(pData(dat.npc), "../Tables/GEO submission/Kabuki Syndrome NPC phenoData matrix.csv")
+write.csv(fData(dat.npc), "../Tables/GEO submission/Kabuki Syndrome NPC featureData matrix.csv")
+
+#Write tables for NPC data frames
+write.csv(as.matrix(exprs(dat.ipsc)), "../Tables/GEO submission/Kabuki Syndrome iPSC expression matrix.csv")
+write.csv(pData(dat.ipsc), "../Tables/GEO submission/Kabuki Syndrome iPSC phenoData matrix.csv")
+write.csv(fData(dat.ipsc), "../Tables/GEO submission/Kabuki Syndrome iPSC featureData matrix.csv")
+
+```
+
+```{r Session Info, tidy = TRUE}
 sessionInfo()
 ```
